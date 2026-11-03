@@ -2,6 +2,7 @@
 /PDF2Image.exe
 /selftest.exe
 /bin/
+/testbin/
 rsrc_windows_amd64.syso
 *.zip
 latest.json

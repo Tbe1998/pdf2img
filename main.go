@@ -32,7 +32,7 @@ func main() {
 		}
 		return
 	}
-	if hasArg(os.Args[1:], "--selftest") {
+	if hasArg(os.Args[1:], "--selftest") || hasArg(os.Args[1:], "--selftest-console") {
 		console := hasArg(os.Args[1:], "--selftest-console")
 		ok := runSelfTest(console)
 		if !ok {
