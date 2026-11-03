@@ -1,0 +1,8 @@
+# 构建产物
+/PDF2Image.exe
+/selftest.exe
+/bin/
+rsrc_windows_amd64.syso
+*.zip
+latest.json
+__pycache__/
