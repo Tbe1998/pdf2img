@@ -346,7 +346,16 @@ func runGUI() error {
 	wc.cbSize = uint32(unsafe.Sizeof(wc))
 	cursor, _, _ := pLoadCursorW.Call(0, uintptr(32512))
 	wc.hCursor = syscall.Handle(cursor)
-	icon, _, _ := pLoadIconW.Call(uintptr(hInstance), 1)
+	// 图标组 ID 不一定是 1：rsrc 同时嵌入清单时，清单会占用 ID 1，
+	// 图标组会顺延成 2。按 ID 从小到大找一个能用的，别写死。
+	icon := uintptr(0)
+	for id := uintptr(1); id <= 32; id++ {
+		h, _, _ := pLoadIconW.Call(uintptr(hInstance), id)
+		if h != 0 {
+			icon = h
+			break
+		}
+	}
 	if icon == 0 {
 		icon, _, _ = pLoadIconW.Call(0, uintptr(32512))
 	}
