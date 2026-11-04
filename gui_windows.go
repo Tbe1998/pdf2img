@@ -250,13 +250,16 @@ type guiApp struct {
 	hFmt, hDPI, hPages, hQuality, hPass   syscall.Handle
 	hBtnStart, hBtnStop, hBtnOpenOut      syscall.Handle
 	hBtnUpd, hBtnQuit                     syscall.Handle
-	hLog, hStatus, hProgress, hLblInfo    syscall.Handle
+	hLog, hStatus, hLblInfo              syscall.Handle
 
 	th            theme
 	cards         []rect
 	editFrames    []rect
 	sectionLabels []syscall.Handle
+	hintLabels    []syscall.Handle
+	chips         []chip
 	allButtons    []syscall.Handle
+	progressVal   int32
 
 	files      []string
 	busy       bool
@@ -548,10 +551,18 @@ func (a *guiApp) buildUI() {
 
 	setFont := func(h syscall.Handle, f syscall.Handle) { pSendMessageW.Call(uintptr(h), wmSetFont, uintptr(f), 1) }
 	lbl := func(text string, x, y, w, h int32) syscall.Handle { return a.mk("STATIC", text, 0, x, y, w, h, 0) }
-	section := func(text string, x, y, w, h int32) syscall.Handle {
-		h2 := lbl(text, x, y, w, h)
+	step := 0
+	section := func(title, hint string, x, y, hintX, hintW int32) syscall.Handle {
+		step++
+		a.chips = append(a.chips, chip{n: int32(step), r: rect{a.px(x), a.px(y - 1), a.px(x + 18), a.px(y + 17)}})
+		h2 := lbl(title, x+26, y, 220, 20)
 		setFont(h2, a.th.fLabel)
 		a.sectionLabels = append(a.sectionLabels, h2)
+		if hint != "" {
+			h3 := lbl(hint, hintX, y, hintW, 20)
+			setFont(h3, a.th.fSmall)
+			a.hintLabels = append(a.hintLabels, h3)
+		}
 		return h2
 	}
 	edit := func(x, y, w, h int32, id int32, extra uint32) syscall.Handle {
@@ -565,72 +576,74 @@ func (a *guiApp) buildUI() {
 		a.allButtons = append(a.allButtons, b)
 		return b
 	}
+	chk := func(text string, x, y, w int32, id int32) syscall.Handle {
+		// BS_OWNERDRAW 不能与 BS_AUTOCHECKBOX 混用，勾选状态自己翻转（见 onCommand）
+		b := a.mk("BUTTON", text, bsOwnerDraw|wsTabStop, x, y, w, 24, id)
+		a.allButtons = append(a.allButtons, b)
+		return b
+	}
 	card := func(x, y, w, h int32) { a.cards = append(a.cards, rect{a.px(x), a.px(y), a.px(x + w), a.px(y + h)}) }
 
 	// ① 输入
 	card(16, 84, 798, 156)
-	section("① 选择 PDF  ·  可多选，也可以把文件 / 文件夹直接拖进窗口", 32, 96, 620, 20)
-	a.hList = a.mk("EDIT", "", wsVScroll|esMultiline|esReadOnly|esAutoVScroll|wsTabStop, 32, 116, 616, 84, idList)
-	a.editFrames = append(a.editFrames, rect{a.px(30), a.px(114), a.px(650), a.px(202)})
+	section("选择 PDF", "可多选，也可以把文件或文件夹直接拖进窗口", 32, 98, 150, 480)
+	a.hList = a.mk("EDIT", "", wsVScroll|esMultiline|esReadOnly|esAutoVScroll|wsTabStop, 32, 124, 596, 96, idList)
+	a.editFrames = append(a.editFrames, rect{a.px(30), a.px(122), a.px(630), a.px(222)})
 	pSendMessageW.Call(uintptr(a.hList), emSetMargins, 0x0003, uintptr(8|(8<<16)))
 	setFont(a.hList, a.th.fSmall)
-	a.hBtnAdd = btn("添加 PDF…", 660, 116, 130, 30, idBtnAdd)
-	a.hBtnAddDir = btn("添加文件夹…", 660, 152, 130, 30, idBtnAddDir)
-	a.hBtnClear = btn("清空列表", 660, 188, 130, 26, idBtnClear)
+	a.hBtnAdd = btn("添加 PDF…", 644, 126, 146, 34, idBtnAdd)
+	a.hBtnAddDir = btn("添加文件夹…", 644, 168, 146, 34, idBtnAddDir)
+	a.hBtnClear = btn("清空列表", 644, 208, 146, 26, idBtnClear)
 
 	// ② 输出
 	card(16, 250, 798, 124)
-	section("② 输出文件夹  ·  不预填，每次自己选；可从“最近”里快选", 32, 262, 620, 20)
-	a.hOut = edit(32, 282, 592, 30, idEditOut, 0)
-	a.hBtnBrowseOut = btn("浏览…", 636, 282, 80, 30, idBtnBrowseOut)
-	a.hBtnRecent = btn("最近", 724, 282, 80, 30, idBtnRecent)
-	a.hChkSub = a.mk("BUTTON", "每份 PDF 单独建子文件夹", bsAutoCheck|wsTabStop, 32, 326, 250, 24, idChkSub)
-	a.hChkSkip = a.mk("BUTTON", "跳过已存在的图片", bsAutoCheck|wsTabStop, 300, 326, 200, 24, idChkSkip)
-	a.hChkOpen = a.mk("BUTTON", "完成后打开输出文件夹", bsAutoCheck|wsTabStop, 510, 326, 250, 24, idChkOpen)
+	section("输出文件夹", "不预填，每次自己选；可从“最近”里快选", 32, 264, 150, 480)
+	a.hOut = edit(32, 292, 578, 32, idEditOut, 0)
+	a.hBtnBrowseOut = btn("浏览…", 622, 292, 84, 32, idBtnBrowseOut)
+	a.hBtnRecent = btn("最近", 714, 292, 84, 32, idBtnRecent)
+	a.hChkSub = chk("每份 PDF 单独建子文件夹", 32, 338, 244, idChkSub)
+	a.hChkSkip = chk("跳过已存在的图片", 296, 338, 190, idChkSkip)
+	a.hChkOpen = chk("完成后打开输出文件夹", 502, 338, 230, idChkOpen)
 
 	// ③ 参数
 	card(16, 384, 798, 124)
-	section("③ 转换参数", 32, 396, 300, 20)
-	lbl("图片格式", 32, 420, 70, 22)
-	a.hFmt = a.mk("COMBOBOX", "", wsTabStop|wsVScroll|cbsDropDownList, 32, 418, 110, 150, idCmbFmt)
+	section("转换参数", "", 32, 398, 0, 0)
+	lbl("图片格式", 32, 428, 70, 22)
+	a.hFmt = a.mk("COMBOBOX", "", wsTabStop|wsVScroll|cbsDropDownList, 32, 426, 118, 160, idCmbFmt)
 	for _, it := range []string{"PNG（无损）", "JPG（体积小）"} {
 		p, _ := syscall.UTF16PtrFromString(it)
 		pSendMessageW.Call(uintptr(a.hFmt), cbAddString, 0, uintptr(unsafe.Pointer(p)))
 		runtime.KeepAlive(p)
 	}
-	lbl("DPI", 160, 420, 40, 22)
-	a.hDPI = edit(196, 416, 62, 28, idEditDPI, esNumber)
-	lbl("页码范围", 274, 420, 70, 22)
-	a.hPages = edit(344, 416, 150, 28, idEditPages, 0)
-	a.hLblInfo = lbl("留空=全部，如 1-3,5", 502, 420, 280, 22)
+	lbl("DPI", 172, 428, 40, 22)
+	a.hDPI = edit(208, 424, 64, 30, idEditDPI, esNumber)
+	lbl("页码范围", 292, 428, 70, 22)
+	a.hPages = edit(362, 424, 150, 30, idEditPages, 0)
+	a.hLblInfo = lbl("留空=全部，如 1-3,5", 522, 428, 260, 22)
 	setFont(a.hLblInfo, a.th.fSmall)
 
-	lbl("JPG 质量", 32, 464, 70, 22)
-	a.hQuality = edit(96, 460, 52, 28, idEditQuality, esNumber)
-	lbl("PDF 密码", 168, 464, 70, 22)
-	a.hPass = edit(240, 460, 150, 28, idEditPass, 0x0080 /*ES_PASSWORD*/)
-	lbl("有打开密码才填，没有就留空", 402, 464, 300, 22)
+	lbl("JPG 质量", 32, 472, 70, 22)
+	a.hQuality = edit(100, 468, 56, 30, idEditQuality, esNumber)
+	lbl("PDF 密码", 182, 472, 70, 22)
+	a.hPass = edit(254, 468, 150, 30, idEditPass, 0x0080 /*ES_PASSWORD*/)
+	lbl("有打开密码才填，没有就留空", 420, 472, 300, 22)
 
 	// 动作
-	a.hBtnStart = btn("开始转换", 32, 522, 150, 40, idBtnStart)
-	a.hBtnStop = btn("停止", 190, 522, 100, 40, idBtnStop)
-	a.hBtnOpenOut = btn("打开输出文件夹", 298, 522, 150, 40, idBtnOpenOut)
-	a.hBtnUpd = btn("检查更新", 456, 522, 120, 40, idBtnUpd)
-	a.hBtnQuit = btn("退出程序", 584, 522, 110, 40, idBtnQuit)
-
-	// 进度条
-	a.hProgress = a.mk("msctls_progress32", "", pbsSmooth|wsTabStop, 32, 574, 750, 12, 0)
-	pSendMessageW.Call(uintptr(a.hProgress), pbmSetRange32, 0, 100)
+	a.hBtnStart = btn("开始转换", 32, 522, 156, 40, idBtnStart)
+	a.hBtnStop = btn("停止", 198, 522, 96, 40, idBtnStop)
+	a.hBtnOpenOut = btn("打开输出文件夹", 304, 522, 156, 40, idBtnOpenOut)
+	a.hBtnUpd = btn("检查更新", 470, 522, 110, 40, idBtnUpd)
+	a.hBtnQuit = btn("退出程序", 590, 522, 110, 40, idBtnQuit)
 
 	// 日志
 	card(16, 600, 798, 170)
-	section("运行日志", 32, 612, 200, 20)
-	a.hLog = a.mk("EDIT", "", wsVScroll|esMultiline|esReadOnly|esAutoVScroll|wsTabStop, 32, 634, 750, 122, idLog)
-	a.editFrames = append(a.editFrames, rect{a.px(30), a.px(632), a.px(784), a.px(758)})
+	section("运行日志", "", 32, 612, 0, 0)
+	a.hLog = a.mk("EDIT", "", wsVScroll|esMultiline|esReadOnly|esAutoVScroll|wsTabStop, 32, 640, 750, 116, idLog)
+	a.editFrames = append(a.editFrames, rect{a.px(30), a.px(638), a.px(784), a.px(758)})
 	pSendMessageW.Call(uintptr(a.hLog), emSetMargins, 0x0003, uintptr(10|(8<<16)))
 	setFont(a.hLog, a.th.fLog)
 
-	a.hStatus = lbl("状态：就绪", 16, 776, 780, 22)
+	a.hStatus = lbl("状态：就绪", 32, 774, 760, 22)
 	setFont(a.hStatus, a.th.fSmall)
 
 	// 填设置（输出目录故意不预填）
@@ -684,6 +697,18 @@ func (a *guiApp) setCheck(h syscall.Handle, on bool) {
 	pSendMessageW.Call(uintptr(h), bmSetCheck, v, 0)
 }
 
+func (a *guiApp) checkByID(id int32) syscall.Handle {
+	switch id {
+	case idChkSub:
+		return a.hChkSub
+	case idChkSkip:
+		return a.hChkSkip
+	case idChkOpen:
+		return a.hChkOpen
+	}
+	return 0
+}
+
 func (a *guiApp) getCheck(h syscall.Handle) bool {
 	r, _, _ := pSendMessageW.Call(uintptr(h), bmGetCheck, 0, 0)
 	return r == 1
@@ -707,6 +732,22 @@ func (a *guiApp) logLine(s string) {
 
 func (a *guiApp) setStatus(s string) { a.setText(a.hStatus, "状态："+s) }
 
+// setProgress 改自绘进度条并只重画那一小条区域。
+func (a *guiApp) setProgress(v int32) {
+	if v < 0 {
+		v = 0
+	}
+	if v > 100 {
+		v = 100
+	}
+	if v == a.progressVal {
+		return
+	}
+	a.progressVal = v
+	r := rect{a.px(32), a.px(570), a.px(782), a.px(594)}
+	pInvalidateRct.Call(uintptr(a.hwnd), uintptr(unsafe.Pointer(&r)), 0)
+}
+
 func (a *guiApp) drain() {
 	defer func() {
 		if r := recover(); r != nil {
@@ -729,7 +770,7 @@ func (a *guiApp) drain() {
 					if pos > 100 {
 						pos = 100
 					}
-					pSendMessageW.Call(uintptr(a.hProgress), pbmSetPos, uintptr(pos), 0)
+					a.setProgress(int32(pos))
 					a.setStatus(fmt.Sprintf("转换中 … %d/%d 页", e.done, e.total))
 				} else {
 					a.setStatus(fmt.Sprintf("转换中 … 已完成 %d 页", e.done))
@@ -743,7 +784,7 @@ func (a *guiApp) drain() {
 				a.enable(a.hBtnClear, true)
 				if e.ok {
 					a.setStatus(e.text)
-					pSendMessageW.Call(uintptr(a.hProgress), pbmSetPos, 100, 0)
+					a.setProgress(100)
 				} else {
 					a.setStatus(e.text)
 				}
@@ -895,7 +936,13 @@ func (a *guiApp) onCommand(id int32) {
 		}
 	case idBtnRecent:
 		a.showRecentMenu()
-	case idChkSub, idChkSkip, idChkOpen, idCmbFmt:
+	case idChkSub, idChkSkip, idChkOpen:
+		if h := a.checkByID(id); h != 0 {
+			a.setCheck(h, !a.getCheck(h))
+			pInvalidateRct.Call(uintptr(h), 0, 0)
+		}
+		a.saveCfg()
+	case idCmbFmt:
 		a.saveCfg()
 	case idBtnStart:
 		a.startConvert()
@@ -1029,7 +1076,7 @@ func (a *guiApp) startConvert() {
 	a.cancel = newCancelToken()
 	a.donePages = 0
 	a.runStart = time.Now()
-	pSendMessageW.Call(uintptr(a.hProgress), pbmSetPos, 0, 0)
+	a.setProgress(0)
 	a.enable(a.hBtnStart, false)
 	a.enable(a.hBtnStop, true)
 	a.enable(a.hBtnAdd, false)

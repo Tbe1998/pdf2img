@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 830px; height: 800px; overflow: hidden; }
+  body {
+    background: #F5F7F7;
+    font-family: "Microsoft YaHei UI", "Noto Sans SC", "WenQuanYi Zen Hei", sans-serif;
+    color: #171A2B;
+    position: relative;
+    -webkit-font-smoothing: antialiased;
+  }
+  .abs { position: absolute; }
+  /* header */
+  .head { left:0; top:0; width:830px; height:72px; background:#fff; }
+  .hair { left:0; top:71px; width:830px; height:1px; background:#EBECF4; }
+  .iconTile { left:20px; top:14px; width:44px; height:44px; background:#EEF0FE; border-radius:12px; display:flex; align-items:center; justify-content:center; }
+  .iconTile img { width:30px; height:30px; }
+  .title { left:78px; top:12px; height:30px; line-height:30px; font-size:20px; font-weight:700; letter-spacing:.2px; }
+  .sub { left:79px; top:40px; height:22px; line-height:22px; font-size:12px; color:#707488; }
+  .pill { left:736px; top:24px; width:74px; height:24px; background:#EEF0FE; border-radius:12px; color:#4F46E5; font-size:12px; line-height:24px; text-align:center; font-weight:600; }
+  /* cards */
+  .card { background:#fff; border:1px solid #E5E7EF; border-radius:14px; box-shadow:1px 2px 0 #F0EFF6; }
+  .chip { width:18px; height:18px; border-radius:9px; background:#4F46E5; color:#fff; font-family:"Segoe UI","Noto Sans SC",sans-serif; font-size:11px; font-weight:700; line-height:18px; text-align:center; }
+  .sec { font-size:14px; font-weight:600; line-height:20px; }
+  .hint { font-size:12px; color:#707488; line-height:20px; }
+  /* fields */
+  .frame { background:#fff; border:1px solid #E5E7EF; border-radius:8px; }
+  .btn { background:#fff; border:1px solid #E5E7EF; border-radius:9px; font-size:14px; display:flex; align-items:center; justify-content:center; }
+  .btn.primary { background:#4F46E5; border-color:#4F46E5; color:#fff; font-weight:600; }
+  .btn.ghost { background:transparent; border-color:transparent; color:#707488; }
+  .chk { font-size:14px; display:flex; align-items:center; gap:9px; }
+  .box { width:18px; height:18px; border-radius:5px; border:1px solid #C9CEDF; background:#fff; flex:0 0 auto; position:relative; }
+  .box.on { background:#4F46E5; border-color:#4F46E5; }
+  .box.on::after { content:""; position:absolute; left:4px; top:5px; width:8px; height:4px; border-left:2px solid #fff; border-bottom:2px solid #fff; transform:rotate(-45deg); }
+  .label { font-size:14px; line-height:22px; }
+  .muted { color:#707488; font-size:12px; }
+  .pct { font-size:12px; color:#707488; text-align:right; line-height:24px; }
+  .track { height:8px; background:#F0EFF7; border-radius:4px; overflow:hidden; }
+  .fill { height:8px; background:#4F46E5; border-radius:4px; }
+  .log { background:#FAFBFE; border:1px solid #E5E7EF; border-radius:8px; padding:7px 10px; font-family:Consolas, "WenQuanYi Zen Hei Mono", monospace; font-size:12px; line-height:20px; color:#171A2B; overflow:hidden; }
+  .log .t { color:#707488; }
+  .dot { width:6px; height:6px; border-radius:3px; background:#4F46E5; }
+  .status { font-size:12px; color:#707488; line-height:22px; }
+  .combo { background:#fff; border:1px solid #E5E7EF; border-radius:8px; font-size:14px; display:flex; align-items:center; padding:0 9px; justify-content:space-between; }
+  .arrow { width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:5px solid #707488; }
+</style>
+</head>
+<body>
+  <div class="abs head"></div>
+  <div class="abs hair"></div>
+  <div class="abs iconTile"><img src="icons/icon-256.png"></div>
+  <div class="abs title">PDF 转图片助手</div>
+  <div class="abs sub">把 PDF 每一页批量导出为 PNG / JPG</div>
+  <div class="abs pill">v1.0.1</div>
+
+  <!-- 1 选择 PDF -->
+  <div class="abs card" style="left:16px;top:84px;width:798px;height:156px"></div>
+  <div class="abs chip" style="left:32px;top:97px">1</div>
+  <div class="abs sec" style="left:58px;top:98px">选择 PDF</div>
+  <div class="abs hint" style="left:150px;top:98px">可多选，也可以把文件或文件夹直接拖进窗口</div>
+  <div class="abs frame" style="left:30px;top:122px;width:600px;height:100px;padding:7px 10px;font-size:12px;line-height:20px;color:#171A2B;overflow:hidden">
+    施工监测日报_2026-10-31.pdf<br>
+    <span style="color:#707488">D:\资料\基坑\05月\</span>监测数据汇总.pdf<br>
+    <span style="color:#707488">D:\资料\投标\</span>技术标（终版）.pdf
+  </div>
+  <div class="abs btn" style="left:644px;top:126px;width:146px;height:34px">添加 PDF…</div>
+  <div class="abs btn" style="left:644px;top:168px;width:146px;height:34px">添加文件夹…</div>
+  <div class="abs btn ghost" style="left:644px;top:208px;width:146px;height:26px;font-size:13px">清空列表</div>
+
+  <!-- 2 输出 -->
+  <div class="abs card" style="left:16px;top:250px;width:798px;height:124px"></div>
+  <div class="abs chip" style="left:32px;top:263px">2</div>
+  <div class="abs sec" style="left:58px;top:264px">输出文件夹</div>
+  <div class="abs hint" style="left:150px;top:264px">不预填，每次自己选；可从“最近”里快选</div>
+  <div class="abs frame" style="left:30px;top:290px;width:582px;height:36px;line-height:34px;padding-left:9px;font-size:14px;color:#707488">选择输出位置…</div>
+  <div class="abs btn" style="left:622px;top:292px;width:84px;height:32px">浏览…</div>
+  <div class="abs btn" style="left:714px;top:292px;width:84px;height:32px">最近</div>
+  <div class="abs chk" style="left:32px;top:338px;width:244px;height:24px"><span class="box on"></span>每份 PDF 单独建子文件夹</div>
+  <div class="abs chk" style="left:296px;top:338px;width:190px;height:24px"><span class="box on"></span>跳过已存在的图片</div>
+  <div class="abs chk" style="left:502px;top:338px;width:230px;height:24px"><span class="box"></span>完成后打开输出文件夹</div>
+
+  <!-- 3 参数 -->
+  <div class="abs card" style="left:16px;top:384px;width:798px;height:124px"></div>
+  <div class="abs chip" style="left:32px;top:397px">3</div>
+  <div class="abs sec" style="left:58px;top:398px">转换参数</div>
+  <div class="abs label" style="left:32px;top:428px">图片格式</div>
+  <div class="abs combo" style="left:32px;top:424px;width:118px;height:32px">PNG（无损）<span class="arrow"></span></div>
+  <div class="abs label" style="left:172px;top:428px">DPI</div>
+  <div class="abs frame" style="left:206px;top:422px;width:68px;height:34px;line-height:32px;padding-left:9px;font-size:14px">200</div>
+  <div class="abs label" style="left:292px;top:428px">页码范围</div>
+  <div class="abs frame" style="left:360px;top:422px;width:154px;height:34px;line-height:32px;padding-left:9px;font-size:14px;color:#707488">1-3,5</div>
+  <div class="abs muted" style="left:522px;top:430px;line-height:20px">留空=全部，如 1-3,5</div>
+
+  <div class="abs label" style="left:32px;top:472px">JPG 质量</div>
+  <div class="abs frame" style="left:98px;top:466px;width:60px;height:34px;line-height:32px;padding-left:9px;font-size:14px">90</div>
+  <div class="abs label" style="left:182px;top:472px">PDF 密码</div>
+  <div class="abs frame" style="left:252px;top:466px;width:154px;height:34px;line-height:32px;padding-left:9px;font-size:14px;color:#707488">••••••</div>
+  <div class="abs label" style="left:420px;top:472px;color:#707488;font-size:13px">有打开密码才填，没有就留空</div>
+
+  <!-- 动作 -->
+  <div class="abs btn primary" style="left:32px;top:522px;width:156px;height:40px">开始转换</div>
+  <div class="abs btn" style="left:198px;top:522px;width:96px;height:40px">停止</div>
+  <div class="abs btn" style="left:304px;top:522px;width:156px;height:40px">打开输出文件夹</div>
+  <div class="abs btn ghost" style="left:470px;top:522px;width:110px;height:40px">检查更新</div>
+  <div class="abs btn ghost" style="left:590px;top:522px;width:110px;height:40px">退出程序</div>
+
+  <!-- 进度 -->
+  <div class="abs track" style="left:32px;top:578px;width:636px">
+    <div class="fill" style="width:62%"></div>
+  </div>
+  <div class="abs pct" style="left:680px;top:570px;width:102px">62%</div>
+
+  <!-- 日志 -->
+  <div class="abs card" style="left:16px;top:600px;width:798px;height:170px"></div>
+  <div class="abs chip" style="left:32px;top:611px">4</div>
+  <div class="abs sec" style="left:58px;top:612px">运行日志</div>
+  <div class="abs log" style="left:30px;top:638px;width:754px;height:120px">
+    <div><span class="t">09:41:02</span>  程序启动，版本 v1.0.1</div>
+    <div><span class="t">09:41:02</span>  转换组件：D:\Tools\PDF2Image\bin\pdftoppm.exe</div>
+    <div><span class="t">09:41:18</span>  开始转换：2 个 PDF → D:\输出\10月（200 DPI，PNG）</div>
+    <div><span class="t">09:41:20</span>  施工监测日报_2026-10-31.pdf  共 12 页</div>
+    <div><span class="t">09:41:23</span>  ✓ 输出：第 1-12 页 → 施工监测日报_2026-10-31/</div>
+  </div>
+
+  <div class="abs dot" style="left:18px;top:784px"></div>
+  <div class="abs status" style="left:32px;top:774px">状态：转换中 … 8/12 页</div>
+</body>
+</html>
