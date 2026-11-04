@@ -577,10 +577,8 @@ func (a *guiApp) buildUI() {
 		return b
 	}
 	chk := func(text string, x, y, w int32, id int32) syscall.Handle {
-		// BS_OWNERDRAW 不能与 BS_AUTOCHECKBOX 混用，勾选状态自己翻转（见 onCommand）
-		b := a.mk("BUTTON", text, bsOwnerDraw|wsTabStop, x, y, w, 24, id)
-		a.allButtons = append(a.allButtons, b)
-		return b
+		// 用系统复选框（BS_AUTOCHECKBOX）：自绘版点击命中不可靠，功能优先
+		return a.mk("BUTTON", text, bsAutoCheck|wsTabStop, x, y, w, 22, id)
 	}
 	card := func(x, y, w, h int32) { a.cards = append(a.cards, rect{a.px(x), a.px(y), a.px(x + w), a.px(y + h)}) }
 
@@ -695,18 +693,6 @@ func (a *guiApp) setCheck(h syscall.Handle, on bool) {
 		v = 1
 	}
 	pSendMessageW.Call(uintptr(h), bmSetCheck, v, 0)
-}
-
-func (a *guiApp) checkByID(id int32) syscall.Handle {
-	switch id {
-	case idChkSub:
-		return a.hChkSub
-	case idChkSkip:
-		return a.hChkSkip
-	case idChkOpen:
-		return a.hChkOpen
-	}
-	return 0
 }
 
 func (a *guiApp) getCheck(h syscall.Handle) bool {
@@ -936,13 +922,7 @@ func (a *guiApp) onCommand(id int32) {
 		}
 	case idBtnRecent:
 		a.showRecentMenu()
-	case idChkSub, idChkSkip, idChkOpen:
-		if h := a.checkByID(id); h != 0 {
-			a.setCheck(h, !a.getCheck(h))
-			pInvalidateRct.Call(uintptr(h), 0, 0)
-		}
-		a.saveCfg()
-	case idCmbFmt:
+	case idChkSub, idChkSkip, idChkOpen, idCmbFmt:
 		a.saveCfg()
 	case idBtnStart:
 		a.startConvert()

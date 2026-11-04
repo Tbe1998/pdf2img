@@ -3,7 +3,8 @@
 package main
 
 // 界面美化：品牌头部、卡片阴影、步骤徽标、圆角自绘按钮 / 复选框 / 进度条。
-// 配色：靛蓝主色 + 冷白卡片。
+// 圆角统一走“超采样 + HALFTONE 缩小”的抗锯齿路径（GDI 的 RoundRect 本身没有抗锯齿，
+// 直接用会在高分屏上出现明显台阶）。
 
 import (
 	"fmt"
@@ -50,9 +51,11 @@ const (
 	dtEndEllip  = 0x00008000
 	transparent = 1
 	opaqueBk    = 2
-)
 
-type point struct{ x, y int32 }
+	// 超采样倍率：小控件 3 倍、大卡片 2 倍（再高收益不明显，反而拖慢重绘）
+	aaFactorSmall = 3
+	aaFactorBig   = 2
+)
 
 var (
 	gdi = syscall.NewLazyDLL("gdi32.dll")
@@ -60,11 +63,20 @@ var (
 	pCreateSolidBrush = gdi.NewProc("CreateSolidBrush")
 	pCreatePen        = gdi.NewProc("CreatePen")
 	pSelectObject     = gdi.NewProc("SelectObject")
+	pDeleteObject     = gdi.NewProc("DeleteObject")
 	pRoundRect        = gdi.NewProc("RoundRect")
-	pPolyline         = gdi.NewProc("Polyline")
 	pSetBkMode        = gdi.NewProc("SetBkMode")
 	pSetTextColor     = gdi.NewProc("SetTextColor")
 	pSetBkColor       = gdi.NewProc("SetBkColor")
+
+	pCreateCompatibleDC     = gdi.NewProc("CreateCompatibleDC")
+	pCreateCompatibleBitmap = gdi.NewProc("CreateCompatibleBitmap")
+	pDeleteDC               = gdi.NewProc("DeleteDC")
+	pStretchBlt             = gdi.NewProc("StretchBlt")
+	pSetStretchBltMode      = gdi.NewProc("SetStretchBltMode")
+
+	pGetDC     = user32.NewProc("GetDC")
+	pReleaseDC = user32.NewProc("ReleaseDC")
 
 	pFillRect      = user32.NewProc("FillRect")
 	pDrawTextW     = user32.NewProc("DrawTextW")
@@ -97,7 +109,6 @@ type theme struct {
 	brAccent, brAccentD, brDanger                      uintptr
 	brSoft, brShadow, brLog, brTrack, brHair, brBox    uintptr
 	penBorder, penAccent, penDanger, penNull, penBox   uintptr
-	penCheck                                           uintptr
 	fTitle, fLabel, fBody, fSmall, fLog, fChip         syscall.Handle
 	hoverBtn                                           syscall.Handle
 }
@@ -110,10 +121,6 @@ func (a *guiApp) initTheme() {
 	}
 	mkPen := func(w int32, c uint32) uintptr {
 		h, _, _ := pCreatePen.Call(0, uintptr(w), uintptr(c))
-		return h
-	}
-	mkPenNull := func() uintptr {
-		h, _, _ := pCreatePen.Call(5 /*PS_NULL*/, 0, 0) // 无边框，避免圆角处多一圈线
 		return h
 	}
 	t.brBg = mkBrush(clrBg)
@@ -135,15 +142,15 @@ func (a *guiApp) initTheme() {
 	t.penAccent = mkPen(1, clrAccent)
 	t.penDanger = mkPen(1, clrDangBd)
 	t.penBox = mkPen(1, clrBoxBd)
-	t.penCheck = mkPen(2, 0x00FFFFFF)
-	t.penNull = mkPenNull()
+	t.penNull = mkPen(1, clrCard)
 
-	t.fTitle = a.makeFont("Microsoft YaHei UI", 20, 700)
-	t.fLabel = a.makeFont("Microsoft YaHei UI", 14, 600)
-	t.fBody = a.makeFont("Microsoft YaHei UI", 14, 400)
-	t.fSmall = a.makeFont("Microsoft YaHei UI", 12, 400)
-	t.fLog = a.makeFont("Consolas", 12, 400)
-	t.fChip = a.makeFont("Segoe UI", 11, 700)
+	// 字号也要按 DPI 缩放，否则 125%/150% 下会显得字小、控件大
+	t.fTitle = a.makeFont("Microsoft YaHei UI", a.px(20), 700)
+	t.fLabel = a.makeFont("Microsoft YaHei UI", a.px(14), 600)
+	t.fBody = a.makeFont("Microsoft YaHei UI", a.px(14), 400)
+	t.fSmall = a.makeFont("Microsoft YaHei UI", a.px(12), 400)
+	t.fLog = a.makeFont("Consolas", a.px(12), 400)
+	t.fChip = a.makeFont("Segoe UI", a.px(11), 700)
 }
 
 func (a *guiApp) makeFont(face string, px int32, weight int32) syscall.Handle {
@@ -167,6 +174,120 @@ func (a *guiApp) drawText(hdc uintptr, font syscall.Handle, color uint32, s stri
 	pSelectObject.Call(hdc, old)
 }
 
+// bgColorAt 返回矩形中心所在的底色，抗锯齿边缘要按底色混合。
+func (a *guiApp) bgColorAt(r rect) uint32 {
+	cx := (r.left + r.right) / 2
+	cy := (r.top + r.bottom) / 2
+	for _, c := range a.cards {
+		if cx >= c.left && cx <= c.right && cy >= c.top && cy <= c.bottom {
+			return clrCard
+		}
+	}
+	return clrBg
+}
+
+// fillRR 画抗锯齿圆角矩形：先把形状放大 N 倍画进位图，再用 HALFTONE 缩小，
+// 缩小时的平均采样就是抗锯齿。fill==0 表示只描边，stroke==0 表示只填充。
+func (a *guiApp) fillRR(hdc uintptr, r rect, fill, stroke uint32, dia int32, strokeW int32, bg uint32) {
+	w := r.right - r.left
+	h := r.bottom - r.top
+	if w <= 0 || h <= 0 || dia < 0 {
+		return
+	}
+	if bg == 0 {
+		bg = a.bgColorAt(r)
+	}
+	if strokeW < 0 {
+		strokeW = 0
+	}
+
+	f := int32(aaFactorSmall)
+	if w > 320 || h > 220 {
+		f = aaFactorBig
+	}
+	mw, mh := w*f, h*f
+
+	mdc, _, _ := pCreateCompatibleDC.Call(hdc)
+	if mdc == 0 {
+		a.fillRRDirect(hdc, r, fill, stroke, dia, strokeW)
+		return
+	}
+	// 必须用屏幕 DC 建兼容位图：若用按钮的临时 DC，可能拿到 1bpp 单色位图
+	screen, _, _ := pGetDC.Call(uintptr(a.hwnd))
+	bmp, _, _ := pCreateCompatibleBitmap.Call(screen, uintptr(mw), uintptr(mh))
+	pReleaseDC.Call(uintptr(a.hwnd), screen)
+	if bmp == 0 {
+		pDeleteDC.Call(mdc)
+		a.fillRRDirect(hdc, r, fill, stroke, dia, strokeW)
+		return
+	}
+	oldBmp, _, _ := pSelectObject.Call(mdc, bmp)
+
+	// 先铺底色（缩小后边缘像素与底色混合，不会出现白边/黑边）
+	bgBr, _, _ := pCreateSolidBrush.Call(uintptr(bg))
+	mr := rect{0, 0, mw, mh}
+	pFillRect.Call(mdc, uintptr(unsafe.Pointer(&mr)), bgBr)
+	pDeleteObject.Call(bgBr)
+
+	var fb, pb uintptr
+	if fill != 0 {
+		fb, _, _ = pCreateSolidBrush.Call(uintptr(fill))
+	}
+	penW := strokeW * f
+	if penW < 1 {
+		penW = 1
+	}
+	if stroke != 0 && strokeW > 0 {
+		pb, _, _ = pCreatePen.Call(0, uintptr(penW), uintptr(stroke))
+	} else {
+		pb, _, _ = pCreatePen.Call(5 /*PS_NULL*/, 0, 0)
+	}
+	ob, _, _ := pSelectObject.Call(mdc, fb)
+	op, _, _ := pSelectObject.Call(mdc, pb)
+	pRoundRect.Call(mdc, 0, 0, uintptr(mw), uintptr(mh), uintptr(dia*f), uintptr(dia*f))
+	pSelectObject.Call(mdc, op)
+	pSelectObject.Call(mdc, ob)
+	if fb != 0 {
+		pDeleteObject.Call(fb)
+	}
+	if pb != 0 {
+		pDeleteObject.Call(pb)
+	}
+
+	pSetStretchBltMode.Call(hdc, 4 /*HALFTONE*/)
+	pStretchBlt.Call(hdc, uintptr(r.left), uintptr(r.top), uintptr(w), uintptr(h),
+		mdc, 0, 0, uintptr(mw), uintptr(mh), 0x00CC0020 /*SRCCOPY*/)
+
+	pSelectObject.Call(mdc, oldBmp)
+	pDeleteObject.Call(bmp)
+	pDeleteDC.Call(mdc)
+}
+
+// fillRRDirect 是抗锯齿位图创建失败时的退路（老 GDI 圆角，会有锯齿但不至于不显示）。
+func (a *guiApp) fillRRDirect(hdc uintptr, r rect, fill, stroke uint32, dia, strokeW int32) {
+	var fb, pb uintptr
+	if fill != 0 {
+		fb, _, _ = pCreateSolidBrush.Call(uintptr(fill))
+	}
+	if stroke != 0 && strokeW > 0 {
+		pb, _, _ = pCreatePen.Call(0, uintptr(strokeW), uintptr(stroke))
+	} else {
+		pb, _, _ = pCreatePen.Call(5, 0, 0)
+	}
+	ob, _, _ := pSelectObject.Call(hdc, fb)
+	op, _, _ := pSelectObject.Call(hdc, pb)
+	pRoundRect.Call(hdc, uintptr(r.left), uintptr(r.top), uintptr(r.right), uintptr(r.bottom),
+		uintptr(dia), uintptr(dia))
+	pSelectObject.Call(hdc, op)
+	pSelectObject.Call(hdc, ob)
+	if fb != 0 {
+		pDeleteObject.Call(fb)
+	}
+	if pb != 0 {
+		pDeleteObject.Call(pb)
+	}
+}
+
 // paintWindow 画背景、品牌头部、卡片底板、步骤徽标、进度条和状态点。
 func (a *guiApp) paintWindow(hdc uintptr) {
 	t := &a.th
@@ -181,7 +302,7 @@ func (a *guiApp) paintWindow(hdc uintptr) {
 	pFillRect.Call(hdc, uintptr(unsafe.Pointer(&line)), t.brHair)
 
 	// 图标底托
-	a.roundRectR(hdc, rect{a.px(20), a.px(14), a.px(64), a.px(58)}, t.brSoft, t.penNull, a.px(24))
+	a.fillRR(hdc, rect{a.px(20), a.px(14), a.px(64), a.px(58)}, clrSoft, 0, a.px(24), 0, clrCard)
 	if trayIcon != 0 {
 		pDrawIconEx.Call(hdc, uintptr(a.px(27)), uintptr(a.px(21)), uintptr(trayIcon),
 			uintptr(a.px(30)), uintptr(a.px(30)), 0, 0, 0x0003)
@@ -194,44 +315,43 @@ func (a *guiApp) paintWindow(hdc uintptr) {
 
 	// 版本徽标
 	pill := rect{a.px(736), a.px(24), a.px(810), a.px(48)}
-	a.roundRectR(hdc, pill, t.brSoft, t.penNull, a.px(24))
+	a.fillRR(hdc, pill, clrSoft, 0, a.px(24), 0, clrCard)
 	a.drawText(hdc, t.fSmall, clrAccent, "v"+appVersion, pill, dtCenter|dtVCenter|dtSingle)
 
 	// —— 卡片：先画 2px 投影，再画白底 ——
 	for _, c := range a.cards {
 		sh := rect{c.left + a.px(1), c.top + a.px(2), c.right + a.px(1), c.bottom + a.px(2)}
-		a.roundRectR(hdc, sh, t.brShadow, t.penNull, a.px(28))
-		a.roundRectR(hdc, c, t.brCard, t.penBorder, a.px(28))
+		a.fillRR(hdc, sh, clrShadow, 0, a.px(28), 0, 0)
+		a.fillRR(hdc, c, clrCard, clrBorder, a.px(28), 1, 0)
 	}
 	for _, f := range a.editFrames {
-		// 输入框保持纯白底，只描边框，悬停/输入区仍由控件自身绘制
-		a.roundRectR(hdc, f, t.brCard, t.penBorder, a.px(16))
+		a.fillRR(hdc, f, clrCard, clrBorder, a.px(16), 1, 0)
 	}
 
 	// —— 步骤徽标 ——
 	for _, c := range a.chips {
-		a.roundRectR(hdc, c.r, t.brAccent, t.penNull, a.px(18))
+		a.fillRR(hdc, c.r, clrAccent, 0, a.px(18), 0, 0)
 		a.drawText(hdc, t.fChip, 0x00FFFFFF, fmt.Sprintf("%d", c.n), c.r,
 			dtCenter|dtVCenter|dtSingle)
 	}
 
 	// —— 进度条 ——
 	track := rect{a.px(32), a.px(578), a.px(668), a.px(586)}
-	a.roundRectR(hdc, track, t.brTrack, t.penNull, a.px(8))
+	a.fillRR(hdc, track, clrTrack, 0, a.px(8), 0, 0)
 	if a.progressVal > 0 {
 		w := a.px(32) + (a.px(636))*a.progressVal/100
 		if w < a.px(40) {
 			w = a.px(40)
 		}
 		fill := rect{a.px(32), a.px(578), w, a.px(586)}
-		a.roundRectR(hdc, fill, t.brAccent, t.penNull, a.px(8))
+		a.fillRR(hdc, fill, clrAccent, 0, a.px(8), 0, clrTrack)
 	}
 	a.drawText(hdc, t.fSmall, clrMuted, fmt.Sprintf("%d%%", a.progressVal),
 		rect{a.px(680), a.px(570), a.px(782), a.px(594)}, dtRight|dtVCenter|dtSingle)
 
 	// —— 底部状态点 ——
 	dot := rect{a.px(18), a.px(784), a.px(24), a.px(790)}
-	a.roundRectR(hdc, dot, t.brAccent, t.penNull, a.px(6))
+	a.fillRR(hdc, dot, clrAccent, 0, a.px(6), 0, 0)
 }
 
 func (a *guiApp) bgBrushAt(r rect) uintptr {
@@ -245,29 +365,11 @@ func (a *guiApp) bgBrushAt(r rect) uintptr {
 	return a.th.brBg
 }
 
-func (a *guiApp) roundRect(hdc uintptr, r rect, brush, pen uintptr) {
-	a.roundRectR(hdc, r, brush, pen, a.px(28))
-}
-
-func (a *guiApp) roundRectR(hdc uintptr, r rect, brush, pen uintptr, radius int32) {
-	ob, _, _ := pSelectObject.Call(hdc, brush)
-	op, _, _ := pSelectObject.Call(hdc, pen)
-	pRoundRect.Call(hdc, uintptr(r.left), uintptr(r.top), uintptr(r.right), uintptr(r.bottom),
-		uintptr(radius), uintptr(radius))
-	pSelectObject.Call(hdc, op)
-	pSelectObject.Call(hdc, ob)
-}
-
 // drawButton 自绘按钮：主 / 次 / 幽灵 / 危险四种样式 + 悬停 / 按下 / 禁用。
 func (a *guiApp) drawButton(dis *drawItem) {
 	t := &a.th
 	hdc := uintptr(dis.hDC)
 	r := dis.rcItem
-
-	if dis.hwndItem == a.hChkSub || dis.hwndItem == a.hChkSkip || dis.hwndItem == a.hChkOpen {
-		a.drawCheck(dis)
-		return
-	}
 
 	primary := dis.hwndItem == a.hBtnStart
 	danger := dis.hwndItem == a.hBtnQuit
@@ -275,50 +377,44 @@ func (a *guiApp) drawButton(dis *drawItem) {
 	hover := dis.hwndItem == t.hoverBtn
 	disabled := dis.itemState&odsDisabled != 0
 	pressed := dis.itemState&odsSelected != 0
+	bg := a.bgColorAt(r)
 
-	var brush, penH uintptr
+	var fill, stroke uint32
 	var txt uint32
 	switch {
 	case disabled:
-		brush, penH, txt = t.brDisable, t.penBorder, clrDisInk
+		fill, stroke, txt = clrDisable, clrBorder, clrDisInk
 	case primary:
-		brush, penH, txt = t.brAccent, t.penAccent, 0x00FFFFFF
+		fill, stroke, txt = clrAccent, clrAccent, 0x00FFFFFF
 		if pressed || hover {
-			brush = t.brAccentD
+			fill = clrAccentD
 		}
 	case danger:
-		brush, txt = t.brCard, clrDanger
-		penH = t.penNull
+		fill, stroke, txt = clrCard, 0, clrDanger
 		if pressed {
-			brush = t.brPress
+			fill = clrPress
 		} else if hover {
-			brush = t.brHover
+			fill = clrHover
 		}
 	case ghost:
-		brush, penH, txt = t.brCard, t.penNull, clrMuted
+		fill, stroke, txt = bg, 0, clrMuted
 		if pressed {
-			brush = t.brPress
+			fill = clrPress
 		} else if hover {
-			brush, txt = t.brHover, clrAccent
+			fill, txt = clrHover, clrAccent
 		}
 	default:
-		brush, penH, txt = t.brCard, t.penBorder, clrInk
+		fill, stroke, txt = clrCard, clrBorder, clrInk
 		if pressed {
-			brush = t.brPress
+			fill = clrPress
 		} else if hover {
-			brush = t.brHover
+			fill = clrHover
 		}
 	}
 
 	// 先用所在区域底色擦掉整块矩形，否则圆角四角会露出灰框
 	pFillRect.Call(hdc, uintptr(unsafe.Pointer(&r)), a.bgBrushAt(r))
-	if ghost {
-		if hover || pressed {
-			a.roundRectR(hdc, r, brush, t.penNull, a.px(18))
-		}
-	} else {
-		a.roundRectR(hdc, r, brush, penH, a.px(18))
-	}
+	a.fillRR(hdc, r, fill, stroke, a.px(18), 1, 0)
 
 	font := t.fBody
 	if primary {
@@ -331,60 +427,6 @@ func (a *guiApp) drawButton(dis *drawItem) {
 	pSetTextColor.Call(hdc, uintptr(txt))
 	pDrawTextW.Call(hdc, uintptr(unsafe.Pointer(&buf[0])), n,
 		uintptr(unsafe.Pointer(&r)), dtCenter|dtVCenter|dtSingle|dtEndEllip)
-	pSelectObject.Call(hdc, old)
-}
-
-// drawCheck 自绘复选框：18px 圆角方块 + 勾。
-func (a *guiApp) drawCheck(dis *drawItem) {
-	t := &a.th
-	hdc := uintptr(dis.hDC)
-	r := dis.rcItem
-	disabled := dis.itemState&odsDisabled != 0
-	hover := dis.hwndItem == t.hoverBtn
-
-	pFillRect.Call(hdc, uintptr(unsafe.Pointer(&r)), a.bgBrushAt(r))
-
-	side := a.px(18)
-	top := r.top + (r.bottom-r.top-side)/2
-	box := rect{r.left + a.px(2), top, r.left + a.px(2) + side, top + side}
-
-	on := a.getCheck(dis.hwndItem)
-	brush, pen := t.brCard, t.penBox
-	txt := clrInk
-	switch {
-	case disabled:
-		brush, pen, txt = t.brDisable, t.penBorder, clrDisInk
-	case on:
-		brush, pen, txt = t.brAccent, t.penAccent, clrInk
-	case hover:
-		pen = t.penAccent
-	}
-	a.roundRectR(hdc, box, brush, pen, a.px(10))
-
-	if on {
-		pts := []point{
-			{box.left + a.px(4), box.top + side/2},
-			{box.left + side/2 - a.px(1), box.bottom - a.px(5)},
-			{box.right - a.px(4), box.top + a.px(5)},
-		}
-		a.polylineWhite(hdc, pts)
-	}
-
-	buf := make([]uint16, 256)
-	n, _, _ := pGetWindowTextW.Call(uintptr(dis.hwndItem), uintptr(unsafe.Pointer(&buf[0])), 256)
-	txtR := rect{box.right + a.px(9), r.top, r.right, r.bottom}
-	old, _, _ := pSelectObject.Call(hdc, uintptr(t.fBody))
-	pSetBkMode.Call(hdc, transparent)
-	pSetTextColor.Call(hdc, uintptr(txt))
-	pDrawTextW.Call(hdc, uintptr(unsafe.Pointer(&buf[0])), n,
-		uintptr(unsafe.Pointer(&txtR)), dtLeft|dtVCenter|dtSingle|dtEndEllip)
-	pSelectObject.Call(hdc, old)
-}
-
-// polylineWhite 用 2px 白笔画勾。
-func (a *guiApp) polylineWhite(hdc uintptr, pts []point) {
-	old, _, _ := pSelectObject.Call(hdc, a.th.penCheck)
-	pPolyline.Call(hdc, uintptr(unsafe.Pointer(&pts[0])), uintptr(len(pts)))
 	pSelectObject.Call(hdc, old)
 }
 

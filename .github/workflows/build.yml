@@ -48,7 +48,7 @@ jobs:
         run: go install github.com/akavel/rsrc@latest
 
       - name: 生成图标资源
-        run: rsrc -ico app.ico -o rsrc_windows_amd64.syso
+        run: rsrc -ico app.ico -manifest app.manifest -o rsrc_windows_amd64.syso
 
       - name: 下载并裁剪 poppler
         shell: pwsh
