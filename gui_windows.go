@@ -1079,12 +1079,13 @@ func (a *guiApp) runConvert(files []string, outDir string, opt Options) {
 	_ = tool
 
 	// 先统计总页数，进度条才有意义
+	ranges, _ := parsePageRanges(opt.Pages)
 	total := 0
 	info, _ := findTool("pdfinfo")
 	if info != "" {
 		for _, f := range files {
 			if n, e := pdfPageCount(info, f, opt.Password); e == nil {
-				total += n
+				total += expectedPages(n, ranges) // 选了页码范围时，分母不能算整本
 			}
 		}
 	}
@@ -1106,9 +1107,9 @@ func (a *guiApp) runConvert(files []string, outDir string, opt Options) {
 		a.logLine("→ " + filepath.Base(pdf))
 		rep := &convReporter{
 			onLog: a.logLine,
-			onAdd: func(int) {
+			onAdd: func(n int) {
 				a.mu.Lock()
-				done++
+				done += n
 				d := done
 				a.mu.Unlock()
 				select {

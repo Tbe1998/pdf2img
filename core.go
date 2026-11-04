@@ -16,9 +16,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
-const appVersion = "1.0.2"
+const appVersion = "1.0.3"
 
 // 内置更新地址（界面不显示、不可修改）。
 const defaultUpdateURL = "https://www.topbei.cn/pdf2img/latest.json"
@@ -299,10 +300,13 @@ func (r *convReporter) logf(format string, a ...any) {
 		r.onLog(fmt.Sprintf(format, a...))
 	}
 }
-func (r *convReporter) pageDone() {
-	if r.onAdd != nil {
+func (r *convReporter) pageDone() { r.pagesDone(1) }
+
+// pagesDone 一次上报 n 页（轮询到新产物时批量上报，避免逐页抢锁）。
+func (r *convReporter) pagesDone(n int) {
+	if r.onAdd != nil && n > 0 {
 		r.mu.Lock()
-		r.onAdd(1)
+		r.onAdd(n)
 		r.mu.Unlock()
 	}
 }
@@ -408,7 +412,36 @@ func convertOne(pdf, outRoot string, opt Options, cancel *cancelToken, rep *conv
 		if cancel != nil {
 			cancel.attach(cmd)
 		}
-		werr := cmd.Wait()
+
+		// 边转边报进度：pdftoppm 每写出一页就往临时目录丢一个文件，
+		// 每 150ms 数一次新增文件数并上报，用户能实时看到“8/40 页”。
+		// 不能等 cmd.Wait() 再数——那时已经全部转完，进度会直接 0→100。
+		doneCh := make(chan error, 1)
+		go func() { doneCh <- cmd.Wait() }()
+		segReported := 0
+		countNow := func() int {
+			files, _ := filepath.Glob(filepath.Join(tmp, "p-*"+ext))
+			return len(files)
+		}
+		werr := error(nil)
+		tick := time.NewTicker(150 * time.Millisecond)
+	waitLoop:
+		for {
+			select {
+			case werr = <-doneCh:
+				if n := countNow(); n > segReported {
+					rep.pagesDone(n - segReported)
+					segReported = n
+				}
+				break waitLoop
+			case <-tick.C:
+				if n := countNow(); n > segReported {
+					rep.pagesDone(n - segReported)
+					segReported = n
+				}
+			}
+		}
+		tick.Stop()
 		if cancel != nil {
 			cancel.detach(cmd)
 		}
@@ -432,7 +465,6 @@ func convertOne(pdf, outRoot string, opt Options, cancel *cancelToken, rep *conv
 			if opt.SkipExists {
 				if _, err := os.Stat(dst); err == nil {
 					res.Skipped++
-					rep.pageDone()
 					continue
 				}
 			}
@@ -444,10 +476,30 @@ func convertOne(pdf, outRoot string, opt Options, cancel *cancelToken, rep *conv
 				}
 			}
 			res.Written++
-			rep.pageDone()
 		}
 	}
 	return res
+}
+
+// expectedPages 算出这次实际会转多少页：没填范围=整本，填了范围=各区间页数之和。
+func expectedPages(total int, ranges []pageRange) int {
+	if total <= 0 {
+		return 0
+	}
+	if ranges == nil {
+		return total
+	}
+	sum := 0
+	for _, r := range ranges {
+		last := r.last
+		if last == 0 || last > total {
+			last = total
+		}
+		if r.first <= total && last >= r.first {
+			sum += last - r.first + 1
+		}
+	}
+	return sum
 }
 
 func pageHint(first, last int) string {
