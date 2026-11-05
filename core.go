@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-const appVersion = "1.0.5"
+const appVersion = "1.0.6"
 
 // 内置更新地址（界面不显示、不可修改）。
 const defaultUpdateURL = "https://www.topbei.cn/pdf2img/latest.json"

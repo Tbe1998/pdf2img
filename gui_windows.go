@@ -1262,24 +1262,20 @@ type taskDialogButton struct {
 
 type taskDialogConfig struct {
 	cbSize               uint32
-	_                    uint32
+	_                    uint32 // 对齐 hwndParent
 	hwndParent           syscall.Handle
 	hInstance            syscall.Handle
 	flags                uint32
-	_                    uint32
-	commonButtons        uint32
-	_                    uint32
+	commonButtons        uint32 // 与 flags 紧邻，不能补位
 	windowTitle          *uint16
-	mainIcon             uintptr
+	mainIcon             uintptr // union{hMainIcon, pszMainIcon}
 	mainInstruction      *uint16
 	content              *uint16
 	cButtons             uint32
 	_                    uint32
 	pButtons             *taskDialogButton
 	defaultButton        int32
-	_                    uint32
-	cRadioButtons        uint32
-	_                    uint32
+	cRadioButtons        uint32 // 与 defaultButton 紧邻
 	pRadioButtons        uintptr
 	defaultRadioButton   int32
 	_                    uint32
@@ -1287,16 +1283,37 @@ type taskDialogConfig struct {
 	expandedInformation  *uint16
 	expandedControlText  *uint16
 	collapsedControlText *uint16
+	footerIcon           uintptr // union{hFooterIcon, pszFooterIcon}
 	footer               *uint16
 	callback             uintptr
 	callbackData         uintptr
 	width                uint32
-	_                    uint32
+	_                    uint32 // 尾部补齐到 8 字节边界
 }
 
 // askCloseAction 弹出关闭方式选择框。
 // 返回 idCloseToTray / idCloseQuit；用户按 Esc 或关闭对话框时返回 0（什么都不做）。
 func (a *guiApp) askCloseAction() int {
+	// 兜底：TaskDialog 不可用或调用失败时，用普通消息框也要给出选择，绝不静默无响应。
+	fallback := func() int {
+		r := msgBox(a.hwnd, "要退出到后台还是完全退出程序？\r\n\r\n“是”：退出到后台（任务继续运行）\r\n“否”：完全退出程序",
+			"关闭 PDF 转图片助手", mbYesNo|mbIconQuest)
+		if r == idYes {
+			return idCloseToTray
+		}
+		return idCloseQuit
+	}
+
+	if err := pTaskDialogIndirect.Find(); err != nil {
+		trace("TaskDialogIndirect 不可用：%v", err)
+		return fallback()
+	}
+	// 结构体必须严格等于 Win32 的 TASKDIALOGCONFIG（x64 上 176 字节），否则直接兜底。
+	if unsafe.Sizeof(taskDialogConfig{}) != 176 {
+		trace("TASKDIALOGCONFIG 布局不符：%d", unsafe.Sizeof(taskDialogConfig{}))
+		return fallback()
+	}
+
 	title, _ := syscall.UTF16PtrFromString("关闭 PDF 转图片助手")
 	instr, _ := syscall.UTF16PtrFromString("您希望怎样关闭这个程序？")
 	content, _ := syscall.UTF16PtrFromString("退出到后台后程序继续驻留在系统托盘，正在进行的转换不会中断。")
@@ -1310,25 +1327,12 @@ func (a *guiApp) askCloseAction() int {
 		runtime.KeepAlive(b2)
 	}()
 
-	if err := pTaskDialogIndirect.Find(); err != nil || unsafe.Sizeof(taskDialogConfig{}) != 184 {
-		// 兜底：极老的系统没有 TaskDialogIndirect，用普通消息框代替
-		r := msgBox(a.hwnd, "要退出到后台还是完全退出程序？\r\n\r\n“是”：退出到后台（任务继续运行）\r\n“否”：完全退出程序",
-			"关闭 PDF 转图片助手", mbYesNo|mbIconQuest)
-		if r == idYes {
-			return idCloseToTray
-		}
-		if r == idNo {
-			return idCloseQuit
-		}
-		return 0
-	}
-
 	buttons := [2]taskDialogButton{
 		{id: idCloseToTray, text: b1},
 		{id: idCloseQuit, text: b2},
 	}
 	cfg := taskDialogConfig{
-		cbSize:          184,
+		cbSize:          uint32(unsafe.Sizeof(taskDialogConfig{})),
 		hwndParent:      a.hwnd,
 		hInstance:       hInstance,
 		flags:           tdfAllowCancellation | tdfUseCommandLinks | tdfPositionRelative | tdfSizeToContent,
@@ -1345,8 +1349,8 @@ func (a *guiApp) askCloseAction() int {
 		uintptr(unsafe.Pointer(&pressed)), 0, 0)
 	runtime.KeepAlive(buttons)
 	if hr != 0 {
-		trace("TaskDialog 调用失败：hr=0x%x", hr)
-		return 0
+		trace("TaskDialog 调用失败：hr=0x%x，改用消息框", hr)
+		return fallback()
 	}
 	switch pressed {
 	case idCloseToTray, idCloseQuit:
