@@ -27,6 +27,7 @@ var (
 	shell32  = syscall.NewLazyDLL("shell32.dll")
 	ole32    = syscall.NewLazyDLL("ole32.dll")
 	comdlg32 = syscall.NewLazyDLL("comdlg32.dll")
+	comctl32 = syscall.NewLazyDLL("comctl32.dll")
 
 	pRegisterClassExW   = user32.NewProc("RegisterClassExW")
 	pCreateWindowExW    = user32.NewProc("CreateWindowExW")
@@ -59,6 +60,7 @@ var (
 	pShellExecuteW        = shell32.NewProc("ShellExecuteW")
 	pGetOpenFileNameW     = comdlg32.NewProc("GetOpenFileNameW")
 	pShellNotifyIconW     = shell32.NewProc("Shell_NotifyIconW")
+	pTaskDialogIndirect   = comctl32.NewProc("TaskDialogIndirect")
 	pFindWindowW          = user32.NewProc("FindWindowW")
 	pPostMessageW         = user32.NewProc("PostMessageW")
 	pSetForegroundWindow  = user32.NewProc("SetForegroundWindow")
@@ -81,14 +83,14 @@ var (
 )
 
 const (
-	wsChild       = 0x40000000
-	wsVisible     = 0x10000000
-	wsVScroll     = 0x00200000
-	wsTabStop     = 0x00010000
-	wsOverlapped  = 0x00CF0000
-	wsThickFrame  = 0x00040000
-	wsMaximizeBox = 0x00010000
-	wsMinimizeBox = 0x00020000
+	wsChild        = 0x40000000
+	wsVisible      = 0x10000000
+	wsVScroll      = 0x00200000
+	wsTabStop      = 0x00010000
+	wsOverlapped   = 0x00CF0000
+	wsThickFrame   = 0x00040000
+	wsMaximizeBox  = 0x00010000
+	wsMinimizeBox  = 0x00020000
 	wsClipChildren = 0x02000000
 
 	esAutoHScroll         = 0x0080
@@ -141,6 +143,17 @@ const (
 	mbIconWarn  = 0x00000030
 	mbIconQuest = 0x00000020
 	idYes       = 6
+	idNo        = 7
+
+	// TaskDialog（关闭方式选择）
+	tdfAllowCancellation = 0x00000008
+	tdfUseCommandLinks   = 0x00000010
+	tdfPositionRelative  = 0x00001000
+	tdfSizeToContent     = 0x01000000
+	tdInfoIcon           = 0xFFFD // MAKEINTRESOURCE(-3)
+
+	idCloseToTray = 101
+	idCloseQuit   = 102
 )
 
 type wndClassEx struct {
@@ -182,11 +195,11 @@ type browseInfo struct {
 	hwndOwner      syscall.Handle
 	pidlRoot       uintptr
 	pszDisplayName *uint16
-	lpszTitle     *uint16
-	ulFlags       uint32
-	lpfn          uintptr
-	lParam        uintptr
-	iImage        int32
+	lpszTitle      *uint16
+	ulFlags        uint32
+	lpfn           uintptr
+	lParam         uintptr
+	iImage         int32
 }
 
 const (
@@ -250,7 +263,7 @@ type guiApp struct {
 	hFmt, hDPI, hPages, hQuality, hPass   syscall.Handle
 	hBtnStart, hBtnStop, hBtnOpenOut      syscall.Handle
 	hBtnUpd, hBtnQuit                     syscall.Handle
-	hLog, hStatus, hLblInfo              syscall.Handle
+	hLog, hStatus, hLblInfo               syscall.Handle
 
 	th            theme
 	cards         []rect
@@ -1238,6 +1251,110 @@ func msgBox(owner syscall.Handle, text, caption string, flags uint32) int32 {
 	return int32(r)
 }
 
+// ---------- 关闭方式选择（TaskDialog） ----------
+
+// TASKDIALOG_BUTTON / TASKDIALOGCONFIG 的 64 位布局，字段间显式补位对齐 Win32 结构。
+type taskDialogButton struct {
+	id   int32
+	_    int32
+	text *uint16
+}
+
+type taskDialogConfig struct {
+	cbSize               uint32
+	_                    uint32
+	hwndParent           syscall.Handle
+	hInstance            syscall.Handle
+	flags                uint32
+	_                    uint32
+	commonButtons        uint32
+	_                    uint32
+	windowTitle          *uint16
+	mainIcon             uintptr
+	mainInstruction      *uint16
+	content              *uint16
+	cButtons             uint32
+	_                    uint32
+	pButtons             *taskDialogButton
+	defaultButton        int32
+	_                    uint32
+	cRadioButtons        uint32
+	_                    uint32
+	pRadioButtons        uintptr
+	defaultRadioButton   int32
+	_                    uint32
+	verificationText     *uint16
+	expandedInformation  *uint16
+	expandedControlText  *uint16
+	collapsedControlText *uint16
+	footer               *uint16
+	callback             uintptr
+	callbackData         uintptr
+	width                uint32
+	_                    uint32
+}
+
+// askCloseAction 弹出关闭方式选择框。
+// 返回 idCloseToTray / idCloseQuit；用户按 Esc 或关闭对话框时返回 0（什么都不做）。
+func (a *guiApp) askCloseAction() int {
+	title, _ := syscall.UTF16PtrFromString("关闭 PDF 转图片助手")
+	instr, _ := syscall.UTF16PtrFromString("您希望怎样关闭这个程序？")
+	content, _ := syscall.UTF16PtrFromString("退出到后台后程序继续驻留在系统托盘，正在进行的转换不会中断。")
+	b1, _ := syscall.UTF16PtrFromString("退出到后台\n继续在托盘运行，双击托盘图标可重新打开")
+	b2, _ := syscall.UTF16PtrFromString("完全退出程序\n结束程序并释放全部资源")
+	defer func() {
+		runtime.KeepAlive(title)
+		runtime.KeepAlive(instr)
+		runtime.KeepAlive(content)
+		runtime.KeepAlive(b1)
+		runtime.KeepAlive(b2)
+	}()
+
+	if err := pTaskDialogIndirect.Find(); err != nil || unsafe.Sizeof(taskDialogConfig{}) != 184 {
+		// 兜底：极老的系统没有 TaskDialogIndirect，用普通消息框代替
+		r := msgBox(a.hwnd, "要退出到后台还是完全退出程序？\r\n\r\n“是”：退出到后台（任务继续运行）\r\n“否”：完全退出程序",
+			"关闭 PDF 转图片助手", mbYesNo|mbIconQuest)
+		if r == idYes {
+			return idCloseToTray
+		}
+		if r == idNo {
+			return idCloseQuit
+		}
+		return 0
+	}
+
+	buttons := [2]taskDialogButton{
+		{id: idCloseToTray, text: b1},
+		{id: idCloseQuit, text: b2},
+	}
+	cfg := taskDialogConfig{
+		cbSize:          184,
+		hwndParent:      a.hwnd,
+		hInstance:       hInstance,
+		flags:           tdfAllowCancellation | tdfUseCommandLinks | tdfPositionRelative | tdfSizeToContent,
+		windowTitle:     title,
+		mainIcon:        tdInfoIcon,
+		mainInstruction: instr,
+		content:         content,
+		cButtons:        2,
+		pButtons:        &buttons[0],
+		defaultButton:   idCloseToTray,
+	}
+	var pressed int32
+	hr, _, _ := pTaskDialogIndirect.Call(uintptr(unsafe.Pointer(&cfg)),
+		uintptr(unsafe.Pointer(&pressed)), 0, 0)
+	runtime.KeepAlive(buttons)
+	if hr != 0 {
+		trace("TaskDialog 调用失败：hr=0x%x", hr)
+		return 0
+	}
+	switch pressed {
+	case idCloseToTray, idCloseQuit:
+		return int(pressed)
+	}
+	return 0
+}
+
 type openFileName struct {
 	lStructSize       uint32
 	hwndOwner         syscall.Handle
@@ -1270,12 +1387,12 @@ func utf16z(s string) []uint16 {
 }
 
 const (
-	ofnReadOnly       = 0x00000001
-	ofnAllowMulti     = 0x00000200
-	ofnPathMustExist  = 0x00000800
-	ofnFileMustExist  = 0x00001000
-	ofnExplorer       = 0x00080000
-	ofnHideReadOnly   = 0x00000004
+	ofnReadOnly      = 0x00000001
+	ofnAllowMulti    = 0x00000200
+	ofnPathMustExist = 0x00000800
+	ofnFileMustExist = 0x00001000
+	ofnExplorer      = 0x00080000
+	ofnHideReadOnly  = 0x00000004
 )
 
 // browseForFiles 支持多选。返回选中的完整路径列表。
@@ -1444,16 +1561,19 @@ func (a *guiApp) removeTray() {
 	a.trayAdded = false
 }
 
-func (a *guiApp) hideToTray() {
+// hideToTray 收起窗口并在托盘常驻；托盘图标创建失败时退化为最小化到任务栏。
+// 返回 true 表示确实收进了托盘。
+func (a *guiApp) hideToTray() bool {
 	if !a.addTray() {
 		pShowWindow.Call(uintptr(a.hwnd), swMinimize)
 		a.logLine("无法创建托盘图标，已最小化到任务栏")
-		return
+		return false
 	}
 	pShowWindow.Call(uintptr(a.hwnd), swHide)
 	b := a.trayData(true)
 	pShellNotifyIconW.Call(nimModify, uintptr(unsafe.Pointer(&b[0])))
 	runtime.KeepAlive(b)
+	return true
 }
 
 func (a *guiApp) showFromTray() {
@@ -1514,15 +1634,20 @@ func (a *guiApp) onClose() {
 		pDestroyWindow.Call(uintptr(a.hwnd))
 		return
 	}
-	if a.busy {
-		if msgBox(a.hwnd, "正在转换中，退出会中断任务。\r\n\r\n确定要退出吗？", "还在转换",
-			mbYesNo|mbIconQuest) != idYes {
-			return
+	switch a.askCloseAction() {
+	case idCloseToTray:
+		if a.hideToTray() {
+			a.logLine("已退出到后台，双击托盘图标可重新打开")
+		}
+	case idCloseQuit:
+		if a.busy {
+			if msgBox(a.hwnd, "正在转换中，完全退出会中断任务。\r\n\r\n确定要退出吗？", "还在转换",
+				mbYesNo|mbIconQuest) != idYes {
+				return
+			}
 		}
 		a.quitApp()
-		return
 	}
-	a.hideToTray()
 }
 
 var _ = exec.Command
