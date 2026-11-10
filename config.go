@@ -21,6 +21,7 @@ type Config struct {
 	OpenWhenDone bool     `json:"open_when_done"`
 	NamePattern  string   `json:"name_pattern"`
 	AutoCheckUpd bool     `json:"auto_check_update"`
+	Jobs         int      `json:"jobs,omitempty"` // 并行转换路数；0=自动（CPU 核数，最多 4）
 	RecentOut    []string `json:"recent_out,omitempty"`
 }
 
