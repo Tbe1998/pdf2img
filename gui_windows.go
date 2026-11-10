@@ -1122,41 +1122,48 @@ func (a *guiApp) runConvert(files []string, outDir string, opt Options) {
 	done := 0
 	filesOK, filesFail := 0, 0
 	images := 0
-	for _, pdf := range files {
-		if a.cancel.stopped() {
-			break
-		}
-		a.logLine("→ " + filepath.Base(pdf))
-		rep := &convReporter{
-			onLog: a.logLine,
-			onAdd: func(n int) {
-				a.mu.Lock()
-				done += n
-				d := done
-				a.mu.Unlock()
-				select {
-				case a.events <- uiEvent{kind: evProgress, done: d, total: total}:
-				default:
-				}
-			},
-		}
-		res := convertOne(pdf, outDir, opt, a.cancel, rep)
-		if res.Err != nil {
-			if res.Err == errStopped {
-				break
+	rep := &convReporter{
+		onLog: a.logLine,
+		onAdd: func(n int) {
+			a.mu.Lock()
+			done += n
+			d := done
+			a.mu.Unlock()
+			select {
+			case a.events <- uiEvent{kind: evProgress, done: d, total: total}:
+			default:
 			}
-			filesFail++
-			a.logLine(fmt.Sprintf("✗ %s：%v", filepath.Base(pdf), res.Err))
-			continue
-		}
-		filesOK++
-		images += res.Written
-		if res.Skipped > 0 {
-			a.logLine(fmt.Sprintf("✓ %s：写出 %d 页，跳过 %d 页", filepath.Base(pdf), res.Written, res.Skipped))
-		} else {
-			a.logLine(fmt.Sprintf("✓ %s：写出 %d 页", filepath.Base(pdf), res.Written))
+		},
+		onDone: func(res Result) {
+			if res.Err != nil {
+				if res.Err == errStopped {
+					return
+				}
+				filesFail++
+				a.logLine(fmt.Sprintf("✗ %s：%v", filepath.Base(res.PDF), res.Err))
+				return
+			}
+			filesOK++
+			images += res.Written
+			if res.Skipped > 0 {
+				a.logLine(fmt.Sprintf("✓ %s：写出 %d 页，跳过 %d 页", filepath.Base(res.PDF), res.Written, res.Skipped))
+			} else {
+				a.logLine(fmt.Sprintf("✓ %s：写出 %d 页", filepath.Base(res.PDF), res.Written))
+			}
+		},
+	}
+	for _, pdf := range files {
+		a.logLine("→ " + filepath.Base(pdf))
+	}
+	// 多文件并行转换（1~8 路）：大文件夹批量出图时 CPU 才吃得满。
+	jobs := a.cfg.Jobs
+	if jobs <= 0 {
+		jobs = runtime.NumCPU()
+		if jobs > 4 {
+			jobs = 4
 		}
 	}
+	convertBatch(files, outDir, opt, a.cancel, rep, jobs)
 
 	stopped := a.cancel.stopped()
 	secs := int(time.Since(a.runStart).Seconds())
