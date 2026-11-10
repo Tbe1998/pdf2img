@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-const appVersion = "1.0.6"
+const appVersion = "1.1.0"
 
 // 内置更新地址（界面不显示、不可修改）。
 const defaultUpdateURL = "https://www.topbei.cn/pdf2img/latest.json"
@@ -290,13 +290,17 @@ type Result struct {
 }
 
 type convReporter struct {
-	mu    sync.Mutex
-	onLog func(string)
-	onAdd func(int) // 每完成一页 +1
+	mu     sync.Mutex
+	onLog  func(string)
+	onAdd  func(int)    // 每完成一页 +1
+	onDone func(Result) // 每个 PDF 转换结束（含失败）
 }
 
 func (r *convReporter) logf(format string, a ...any) {
 	if r.onLog != nil {
+		// 多个转换协程会并发写日志，串行化避免半行交错
+		r.mu.Lock()
+		defer r.mu.Unlock()
 		r.onLog(fmt.Sprintf(format, a...))
 	}
 }
@@ -311,12 +315,56 @@ func (r *convReporter) pagesDone(n int) {
 	}
 }
 
+// nameAlloc 在批量转换时给输出文件占位，防止两个不同目录下的同名 PDF
+// 同时写同一个输出文件名（后写的会把前一个静默覆盖）。
+type nameAlloc struct {
+	mu    sync.Mutex
+	taken map[string]bool
+}
+
+func newNameAlloc() *nameAlloc {
+	return &nameAlloc{taken: map[string]bool{}}
+}
+
+// claim 返回本次可安全写入的路径：同名冲突时追加 " (2)"、" (3)"…
+func (a *nameAlloc) claim(p string) string {
+	if a == nil {
+		return p
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	key := strings.ToLower(p)
+	if !a.taken[key] {
+		a.taken[key] = true
+		return p
+	}
+	ext := filepath.Ext(p)
+	stem := strings.TrimSuffix(p, ext)
+	for i := 2; i <= 999; i++ {
+		cand := fmt.Sprintf("%s (%d)%s", stem, i, ext)
+		ck := strings.ToLower(cand)
+		if !a.taken[ck] {
+			a.taken[ck] = true
+			return cand
+		}
+	}
+	return p
+}
+
 // convertOne 转换一个 PDF。所有输出先写到临时目录，成功后再改名搬到目标目录，
 // 中途失败不会留下半套图片。
 func convertOne(pdf, outRoot string, opt Options, cancel *cancelToken, rep *convReporter) Result {
+	return convertOneWith(pdf, outRoot, opt, cancel, rep, nil, "")
+}
+
+// convertOneWith 同 convertOne，额外接受批量输出名占位器（可为 nil）与调用方指定的文件名前缀。
+func convertOneWith(pdf, outRoot string, opt Options, cancel *cancelToken, rep *convReporter, alloc *nameAlloc, baseOverride string) Result {
 	opt.normalize()
 	res := Result{PDF: pdf}
 	base := safeBase(filepath.Base(pdf))
+	if baseOverride != "" {
+		base = baseOverride
+	}
 	res.OutDir = outRoot
 	target := outRoot
 	if opt.SubFolder {
@@ -349,6 +397,13 @@ func convertOne(pdf, outRoot string, opt Options, cancel *cancelToken, rep *conv
 		return res
 	}
 
+	// 命名模板里没有 {page} 时，多页输出会全部写成同一个文件名，
+	// 最终只剩最后一页（旧版本的静默丢页 bug）。页数不止 1 页就自动补页码。
+	pattern := opt.NamePattern
+	if !strings.Contains(pattern, "{page}") && expectedPages(total, ranges) != 1 {
+		pattern += "_{page}"
+	}
+
 	tmp, err := os.MkdirTemp(target, ".pdf2img-")
 	if err != nil {
 		res.Err = fmt.Errorf("创建临时目录失败：%v", err)
@@ -371,7 +426,9 @@ func convertOne(pdf, outRoot string, opt Options, cancel *cancelToken, rep *conv
 		for _, r := range ranges {
 			last := r.last
 			if last == 0 {
-				last = total // 0 = 到末尾，交给 pdftoppm 用 -l 大数
+				// 页数未知时 last 保持 0，下面只传 -f 不传 -l（pdftoppm 会转到末尾）；
+				// 直接传 -l 0 是非法页码，会让整段转换失败。
+				last = total
 			}
 			segs = append(segs, seg{r.first, last})
 		}
@@ -396,7 +453,10 @@ func convertOne(pdf, outRoot string, opt Options, cancel *cancelToken, rep *conv
 			args = append(args, "-upw", opt.Password)
 		}
 		if sg.first > 0 {
-			args = append(args, "-f", strconv.Itoa(sg.first), "-l", strconv.Itoa(sg.last))
+			args = append(args, "-f", strconv.Itoa(sg.first))
+			if sg.last > 0 {
+				args = append(args, "-l", strconv.Itoa(sg.last))
+			}
 		}
 		args = append(args, pdf, prefix)
 
@@ -461,10 +521,13 @@ func convertOne(pdf, outRoot string, opt Options, cancel *cancelToken, rep *conv
 			if page <= 0 {
 				continue
 			}
-			dst := filepath.Join(target, outName(opt.NamePattern, base, page, width)+ext)
+			dst := alloc.claim(filepath.Join(target, outName(pattern, base, page, width)+ext))
 			if opt.SkipExists {
 				if _, err := os.Stat(dst); err == nil {
 					res.Skipped++
+					// 必须删掉临时产物：否则下一个页码区间会再次统计同一页，
+					// 跳过数被重复累加，还会残留在临时目录里直到整个任务结束。
+					_ = os.Remove(f)
 					continue
 				}
 			}
@@ -506,7 +569,7 @@ func pageHint(first, last int) string {
 	if first == 0 {
 		return ""
 	}
-	if last == first {
+	if last <= first {
 		return fmt.Sprintf("（第 %d 页）", first)
 	}
 	return fmt.Sprintf("（第 %d-%d 页）", first, last)
@@ -568,7 +631,108 @@ func (c *cancelToken) detach(cmd *exec.Cmd) {
 
 var errStopped = errors.New("已停止")
 
-// copyFile 复制文件（保留在 core 里，供跨设备改名失败时使用）。
+// BatchSummary 是一次批量转换的汇总。
+type BatchSummary struct {
+	Files   int
+	OK      int
+	Failed  int
+	Images  int
+	Skipped int
+}
+
+// convertBatch 并行转换多个 PDF（jobs 个协程，1~8）。
+// 输出文件名在启动前统一去重，保证两个不同目录下的同名 PDF 不会互相覆盖，
+// 且文件名分配结果与串行执行一致（按传入顺序先到先得）。
+func convertBatch(pdfs []string, outRoot string, opt Options, cancel *cancelToken, rep *convReporter, jobs int) BatchSummary {
+	var sum BatchSummary
+	if len(pdfs) == 0 {
+		return sum
+	}
+	opt.normalize()
+	if jobs < 1 {
+		jobs = 1
+	}
+	if jobs > 8 {
+		jobs = 8
+	}
+	if jobs > len(pdfs) {
+		jobs = len(pdfs)
+	}
+
+	// 先串行分配文件名前缀：同名 PDF 依次得到 "名字"、"名字 (2)"…
+	alloc := newNameAlloc()
+	bases := make(map[string]string, len(pdfs))
+	for _, pdf := range pdfs {
+		b := safeBase(filepath.Base(pdf))
+		if opt.SubFolder {
+			// 每个 PDF 一个子文件夹，天然不冲突
+			bases[pdf] = b
+			continue
+		}
+		bases[pdf] = alloc.claimBase(outRoot, b)
+	}
+
+	results := make([]Result, len(pdfs))
+	sem := make(chan struct{}, jobs)
+	var wg sync.WaitGroup
+	for i, pdf := range pdfs {
+		if cancel != nil && cancel.stopped() {
+			break
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, pdf string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			r := convertOneWith(pdf, outRoot, opt, cancel, rep, alloc, bases[pdf])
+			results[i] = r
+			if rep != nil && rep.onDone != nil {
+				rep.mu.Lock()
+				rep.onDone(r)
+				rep.mu.Unlock()
+			}
+		}(i, pdf)
+	}
+	wg.Wait()
+
+	sum.Files = len(pdfs)
+	for _, r := range results {
+		switch {
+		case r.PDF == "":
+			// 因停止而没跑的
+		case r.Err == errStopped:
+		case r.Err != nil:
+			sum.Failed++
+		default:
+			sum.OK++
+			sum.Images += r.Written
+			sum.Skipped += r.Skipped
+		}
+	}
+	return sum
+}
+
+// claimBase 给输出文件名前缀占位：同名时追加 " (2)"、" (3)"…
+func (a *nameAlloc) claimBase(dir, base string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	key := strings.ToLower(filepath.Join(dir, base))
+	if !a.taken[key] {
+		a.taken[key] = true
+		return base
+	}
+	for i := 2; i <= 999; i++ {
+		cand := fmt.Sprintf("%s (%d)", base, i)
+		ck := strings.ToLower(filepath.Join(dir, cand))
+		if !a.taken[ck] {
+			a.taken[ck] = true
+			return cand
+		}
+	}
+	return base
+}
+
+// copyFile 复制文件；任何一步失败都会删掉目标，避免留下半截图片。
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -581,7 +745,17 @@ func copyFile(src, dst string) error {
 	}
 	if _, err := out.ReadFrom(in); err != nil {
 		out.Close()
+		_ = os.Remove(dst)
 		return err
 	}
-	return out.Close()
+	if err := out.Sync(); err != nil {
+		out.Close()
+		_ = os.Remove(dst)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(dst)
+		return err
+	}
+	return nil
 }
