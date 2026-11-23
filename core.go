@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-const appVersion = "1.1.0"
+const appVersion = "1.1.1"
 
 // 内置更新地址（界面不显示、不可修改）。
 const defaultUpdateURL = "https://www.topbei.cn/pdf2img/latest.json"
@@ -480,8 +480,7 @@ func convertOneWith(pdf, outRoot string, opt Options, cancel *cancelToken, rep *
 		go func() { doneCh <- cmd.Wait() }()
 		segReported := 0
 		countNow := func() int {
-			files, _ := filepath.Glob(filepath.Join(tmp, "p-*"+ext))
-			return len(files)
+			return len(listTempPages(tmp, ext))
 		}
 		werr := error(nil)
 		tick := time.NewTicker(150 * time.Millisecond)
@@ -514,14 +513,14 @@ func convertOneWith(pdf, outRoot string, opt Options, cancel *cancelToken, rep *
 			return res
 		}
 
-		files, _ := filepath.Glob(filepath.Join(tmp, "p-*"+ext))
+		files := listTempPages(tmp, ext)
 		sort.Strings(files)
 		for _, f := range files {
 			page := pageFromTempName(f)
 			if page <= 0 {
 				continue
 			}
-			dst := alloc.claim(filepath.Join(target, outName(pattern, base, page, width)+ext))
+			dst := filepath.Join(target, outName(pattern, base, page, width)+ext)
 			if opt.SkipExists {
 				if _, err := os.Stat(dst); err == nil {
 					res.Skipped++
@@ -531,6 +530,9 @@ func convertOneWith(pdf, outRoot string, opt Options, cancel *cancelToken, rep *
 					continue
 				}
 			}
+			// 先判断“已存在”再占位：占位会把文件名改成 "xxx (2)"，
+			// 拿占位后的路径去 Stat 永远不存在，批量转换时“跳过已存在”就失效了。
+			dst = alloc.claim(dst)
 			if err := os.Rename(f, dst); err != nil {
 				// 跨设备时退回复制
 				if cerr := copyFile(f, dst); cerr != nil {
@@ -540,6 +542,11 @@ func convertOneWith(pdf, outRoot string, opt Options, cancel *cancelToken, rep *
 			}
 			res.Written++
 		}
+	}
+	// 兜底：pdftoppm 退出码 0 却一张图都没写出来时，绝不能报“成功”。
+	// 旧版本就是这样显示“完成：1 个文件，0 张图片”，用户只看到空文件夹。
+	if res.Written == 0 && res.Skipped == 0 {
+		res.Err = errors.New("没有生成任何图片：pdftoppm 没有产出（PDF 页面可能损坏，或该页没有可渲染内容）")
 	}
 	return res
 }
@@ -585,6 +592,35 @@ func pageFromTempName(p string) int {
 	}
 	n, _ := strconv.Atoi(m[1])
 	return n
+}
+
+// listTempPages 列出临时目录里 pdftoppm 产出的 p-<页码><ext> 文件。
+//
+// 不能用 filepath.Glob：Glob 把路径里的 [ ] 当通配符（[2024] 会变成字符集合、
+// 未闭合的 [ 直接返回 ErrBadPattern），而 Windows 文件名允许 [ ]。
+// 输出目录一含方括号，Glob 就一张都匹配不到 —— 图片其实已转出，却被当成 0 张、
+// 随后连临时目录一起删掉，界面上显示“成功、0 张图片”，目标文件夹空的。
+func listTempPages(dir, ext string) []string {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(ents))
+	for _, e := range ents {
+		if e.IsDir() {
+			continue
+		}
+		n := e.Name()
+		if !strings.HasPrefix(n, "p-") || !strings.HasSuffix(n, ext) {
+			continue
+		}
+		if pageFromTempName(n) <= 0 {
+			continue
+		}
+		out = append(out, filepath.Join(dir, n))
+	}
+	sort.Strings(out)
+	return out
 }
 
 // cancelToken 让"停止"能杀掉正在跑的 pdftoppm。

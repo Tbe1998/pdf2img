@@ -180,6 +180,90 @@ echo x > "${prefix}-05.png"
 	}
 }
 
+// 输出目录名含方括号（Windows 合法文件名）时，不能把图片数成 0 张再悄悄删掉。
+// 旧实现用 filepath.Glob("p-*.png")，会把 [ ] 当通配符，一条都匹配不到。
+func TestOutputDirWithBrackets(t *testing.T) {
+	dir := t.TempDir()
+	writeFake(t, dir, "pdftoppm", `
+prefix=""
+for a in "$@"; do prefix="$a"; done
+for i in 1 2; do echo x > "${prefix}-0${i}.png"; done
+`)
+	writeFake(t, dir, "pdfinfo", `echo "Pages:          2"`)
+	t.Setenv("PDF2IMG_PDFTOPPM", filepath.Join(dir, "pdftoppm"))
+	t.Setenv("PDF2IMG_PDFINFO", filepath.Join(dir, "pdfinfo"))
+
+	pdf := filepath.Join(dir, "监测日报.pdf")
+	mustPDF(t, pdf)
+	out := filepath.Join(dir, "资料[2024]", "成品 [1]")
+	res := convertOne(pdf, out, Options{DPI: 72, Format: "png", Quality: 92, NamePattern: "{name}_{page}"}, nil, &convReporter{})
+	if res.Err != nil {
+		t.Fatalf("含方括号的输出目录转换失败：%v", res.Err)
+	}
+	if res.Written != 2 {
+		t.Fatalf("Written=%d，期望 2（方括号目录被当成通配符了）", res.Written)
+	}
+	entries, err := os.ReadDir(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("文件夹里期望 2 张图片，实际 %d 个文件", len(entries))
+	}
+}
+
+// pdftoppm 退出码 0 但一张图都没写时，必须报错，不能算成功。
+func TestNoOutputIsAnError(t *testing.T) {
+	dir := t.TempDir()
+	writeFake(t, dir, "pdftoppm", `exit 0`)
+	writeFake(t, dir, "pdfinfo", `echo "Pages:          1"`)
+	t.Setenv("PDF2IMG_PDFTOPPM", filepath.Join(dir, "pdftoppm"))
+	t.Setenv("PDF2IMG_PDFINFO", filepath.Join(dir, "pdfinfo"))
+
+	pdf := filepath.Join(dir, "e.pdf")
+	mustPDF(t, pdf)
+	res := convertOne(pdf, filepath.Join(dir, "out"), Options{DPI: 72, Format: "png", Quality: 92, NamePattern: "{name}_{page}"}, nil, &convReporter{})
+	if res.Err == nil {
+		t.Fatalf("0 张图片却返回成功（Written=%d），这正是“提示成功但文件夹是空的”的原因", res.Written)
+	}
+}
+
+// 批量模式（有文件名占位器）下，“跳过已存在”必须真的跳过，而不是写成 “名字 (2)”。
+func TestBatchSkipExistsHonorsExisting(t *testing.T) {
+	dir := t.TempDir()
+	writeFake(t, dir, "pdftoppm", `
+prefix=""
+for a in "$@"; do prefix="$a"; done
+echo x > "${prefix}-01.png"
+`)
+	writeFake(t, dir, "pdfinfo", `echo "Pages:          1"`)
+	t.Setenv("PDF2IMG_PDFTOPPM", filepath.Join(dir, "pdftoppm"))
+	t.Setenv("PDF2IMG_PDFINFO", filepath.Join(dir, "pdfinfo"))
+
+	pdf := filepath.Join(dir, "k.pdf")
+	mustPDF(t, pdf)
+	out := filepath.Join(dir, "out")
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(out, "k_001.png"), []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opt := Options{DPI: 72, Format: "png", Quality: 92, SkipExists: true, NamePattern: "{name}_{page}"}
+	sum := convertBatch([]string{pdf}, out, opt, nil, &convReporter{}, 1)
+	if sum.Skipped != 1 || sum.Images != 0 {
+		t.Fatalf("应跳过 1 页、写出 0 张，实际 skipped=%d images=%d", sum.Skipped, sum.Images)
+	}
+	entries, _ := os.ReadDir(out)
+	if len(entries) != 1 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("已存在的图片被重写成了副本：%v", names)
+	}
+}
+
 // 批量并行与串行结果一致：页数、图片数相同。
 func TestBatchParallelMatchesSerial(t *testing.T) {
 	dir := t.TempDir()
